@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>超高品質ボリューム煙（最適化版）</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#000;}
+canvas{display:block;width:100vw;height:100vh;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas=document.getElementById('c');
+const gl=canvas.getContext('webgl');
+
+function resize(){
+ const scale=Math.min(1.5,window.devicePixelRatio||1);
+ canvas.width=innerWidth*scale;
+ canvas.height=innerHeight*scale;
+ canvas.style.width=innerWidth+'px';
+ canvas.style.height=innerHeight+'px';
+ gl.viewport(0,0,canvas.width,canvas.height);
+}
+window.addEventListener('resize',resize);
+resize();
+
+// ===== シェーダ =====
+const vs=`
+attribute vec2 position;
+varying vec2 vUv;
+void main(){
+ vUv=position*0.5+0.5;
+ gl_Position=vec4(position,0.0,1.0);
+}`;
+
+const fs=`
+precision highp float;
+varying vec2 vUv;
+uniform float time;
+uniform vec2 res;
+uniform vec3 cam;
+
+// 高速ハッシュ
+float hash(vec3 p){
+ p=fract(p*0.3183099+.1);
+ p*=17.0;
+ return fract(p.x*p.y*p.z*(p.x+p.y+p.z));
+}
+
+float noise(vec3 p){
+ vec3 i=floor(p);
+ vec3 f=fract(p);
+ f=f*f*(3.0-2.0*f);
+
+ float n=mix(
+  mix(mix(hash(i+vec3(0,0,0)),hash(i+vec3(1,0,0)),f.x),
+      mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),f.x),f.y),
+  mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),f.x),
+      mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x),f.y),f.z);
+ return n;
+}
+
+float fbm(vec3 p){
+ float v=0.0;
+ float a=0.5;
+ for(int i=0;i<4;i++){
+  v+=a*noise(p);
+  p*=2.0;
+  a*=0.5;
+ }
+ return v;
+}
+
+// curl風ベクトル場
+vec3 flow(vec3 p){
+ float e=0.1;
+ float n=fbm(p);
+ float nx=fbm(p+vec3(e,0,0));
+ float ny=fbm(p+vec3(0,e,0));
+ float nz=fbm(p+vec3(0,0,e));
+ return normalize(vec3(ny-nz,nz-nx,nx-ny));
+}
+
+float density(vec3 p){
+ p+=flow(p*0.5+time*0.2)*0.5;
+ float d=fbm(p*0.9 + time*0.05);
+ d+=0.4*fbm(p*1.8 - time*0.03);
+ return smoothstep(0.45,0.85,d);
+}
+
+vec3 palette(float t){
+ return 0.5 + 0.5*cos(6.2831*(vec3(0.2,0.5,0.8)+t));
+}
+
+void main(){
+ vec2 uv=vUv*2.0-1.0;
+ uv.x*=res.x/res.y;
+
+ vec3 dir=normalize(vec3(uv,1.4));
+ vec3 pos=cam;
+
+ vec3 col=vec3(0.0);
+ float t=0.0;
+ float trans=1.0;
+
+ for(int i=0;i<48;i++){ // 最適化：64→48
+  vec3 p=pos+dir*t;
+  float d=density(p);
+
+  float colorIndex=fbm(p*0.4);
+  vec3 c=palette(colorIndex);
+
+  float a=d*0.09;
+  col+=c*a*trans;
+  trans*=1.0-a;
+
+  if(trans<0.02) break; // 早期終了（高速化）
+
+  t+=0.09;
+ }
+
+ // 明瞭度調整
+ col=pow(col,vec3(0.75));
+ col*=1.2;
+
+ gl_FragColor=vec4(col,1.0);
+}`;
+
+function compile(type,src){
+ const s=gl.createShader(type);
+ gl.shaderSource(s,src);
+ gl.compileShader(s);
+ return s;
+}
+
+const prog=gl.createProgram();
+gl.attachShader(prog,compile(gl.VERTEX_SHADER,vs));
+gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,fs));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+const quad=new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]);
+const buf=gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.bufferData(gl.ARRAY_BUFFER,quad,gl.STATIC_DRAW);
+
+const loc=gl.getAttribLocation(prog,'position');
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+
+const timeLoc=gl.getUniformLocation(prog,'time');
+const resLoc=gl.getUniformLocation(prog,'res');
+const camLoc=gl.getUniformLocation(prog,'cam');
+
+let t=0;
+let camZ=0;
+
+window.addEventListener('keydown',e=>{
+ if(e.key==='w') camZ+=0.3;
+ if(e.key==='s') camZ-=0.3;
+});
+
+function loop(){
+ t+=0.016;
+ gl.uniform1f(timeLoc,t);
+ gl.uniform2f(resLoc,canvas.width,canvas.height);
+ gl.uniform3f(camLoc,0.0,0.0,camZ);
+
+ gl.drawArrays(gl.TRIANGLES,0,6);
+ requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
